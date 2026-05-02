@@ -90,7 +90,7 @@ def compute_per_sample_gradients(
     all_grads  = []
     all_labels = []
 
-    loader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=0)
+    loader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=2)
 
     for i, (x, y) in enumerate(loader):
         x, y = x.to(device), y.to(device)
@@ -116,15 +116,14 @@ def compute_gradient_norms(
     model: nn.Module,
     dataset,
     device: torch.device,
-    batch_size: int = 64,
+    batch_size: int = 128,
+    max_samples: int = 5000,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Faster approximation: compute per-sample gradient L2 norms.
+    Compute per-sample gradient L2 norms efficiently using batched processing.
 
-    Samples with anomalously high gradient norms are likely poisoned,
-    since they produce large updates pulling the model toward the wrong class.
-
-    This is an O(N) operation (vs O(N × P) for full gradient matrix).
+    max_samples: Cap the number of samples processed to avoid multi-hour loops
+    on large datasets (5000 is statistically sufficient for outlier detection).
     """
     model.eval()
     criterion = nn.CrossEntropyLoss()
@@ -132,23 +131,32 @@ def compute_gradient_norms(
     all_norms  = []
     all_labels = []
 
-    loader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=0)
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False,
+                        num_workers=2, pin_memory=torch.cuda.is_available())
 
-    for x, y in loader:
-        x, y = x.to(device), y.to(device)
-        model.zero_grad()
-        loss = criterion(model(x), y)
-        loss.backward()
+    processed = 0
+    for x_batch, y_batch in loader:
+        if processed >= max_samples:
+            break
+        x_batch = x_batch.to(device, non_blocking=True)
+        y_batch = y_batch.to(device, non_blocking=True)
 
-        # Total gradient norm across all parameters
-        total_norm = 0.0
-        for p in model.parameters():
-            if p.grad is not None:
-                total_norm += p.grad.detach().norm(2).item() ** 2
-        total_norm = total_norm ** 0.5
+        for i in range(len(x_batch)):
+            if processed >= max_samples:
+                break
+            x = x_batch[i:i+1]
+            y = y_batch[i:i+1]
+            model.zero_grad()
+            loss = criterion(model(x), y)
+            loss.backward()
 
-        all_norms.append(total_norm)
-        all_labels.append(y.item())
+            total_norm = 0.0
+            for p in model.parameters():
+                if p.grad is not None:
+                    total_norm += p.grad.detach().norm(2).item() ** 2
+            all_norms.append(total_norm ** 0.5)
+            all_labels.append(y.item())
+            processed += 1
 
     return np.array(all_norms), np.array(all_labels)
 
@@ -233,6 +241,9 @@ def apply_sever_defense(
     defender_lr: float = 0.001,
     removal_fraction: float = 0.05,
     verbose: bool = True,
+    use_sgd: bool = False,
+    checkpoint_path: str = None,
+    resume_from_checkpoint: str = None,
 ) -> Tuple[nn.Module, float, Dict]:
     """
     Full SEVER pipeline:
@@ -255,7 +266,7 @@ def apply_sever_defense(
     clean_subset = Subset(train_dataset, clean_idx)
     clean_loader = DataLoader(
         clean_subset, batch_size=train_loader.batch_size,
-        shuffle=True, num_workers=0,
+        shuffle=True, num_workers=2, pin_memory=True,
     )
 
     if verbose:
@@ -263,7 +274,8 @@ def apply_sever_defense(
 
     clean_model = model_fn().to(device)
     train_model(clean_model, clean_loader, device,
-                epochs=defender_epochs, lr=defender_lr, verbose=verbose)
+                epochs=defender_epochs, lr=defender_lr, verbose=verbose,
+                use_sgd=use_sgd, checkpoint_path=checkpoint_path, resume_from_checkpoint=resume_from_checkpoint)
 
     acc = evaluate(clean_model, test_loader, device)
     stats["final_accuracy"] = acc

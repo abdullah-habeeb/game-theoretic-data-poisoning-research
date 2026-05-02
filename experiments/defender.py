@@ -107,6 +107,7 @@ def run_one_minmax_round(
     lr: float,
     round_num: int,
     verbose: bool,
+    use_sgd: bool = False,
 ) -> float:
     """
     Execute one round of the alternating min–max game:
@@ -135,20 +136,29 @@ def run_one_minmax_round(
     )
 
     train_loader = DataLoader(
-        poisoned_train_ds, batch_size=batch_size, shuffle=True, num_workers=0
+        poisoned_train_ds, batch_size=batch_size, shuffle=True, num_workers=2
     )
     test_loader = DataLoader(
-        test_ds, batch_size=batch_size, shuffle=False, num_workers=0
+        test_ds, batch_size=batch_size, shuffle=False, num_workers=2
     )
 
     # ── DEFENDER STEP ────────────────────────────────────────────────────────
     # Defender trains a fresh model to minimize cross-entropy on the (poisoned) training data.
     # This is the "minimization" step in the min-max formulation.
     model = get_model(device, dataset)
-    train_model(model, train_loader, device, epochs=epochs, lr=lr, verbose=verbose)
+    
+    ckpt_dir = os.path.join(os.path.dirname(__file__), "..", "results", "checkpoints")
+    os.makedirs(ckpt_dir, exist_ok=True)
+    epoch_ckpt = os.path.join(ckpt_dir, f"{dataset}_minmax_r{round_num}_seed{seed}_epoch.pt")
+    
+    train_model(model, train_loader, device, epochs=epochs, lr=lr, verbose=verbose, use_sgd=use_sgd,
+                checkpoint_path=epoch_ckpt, resume_from_checkpoint=epoch_ckpt)
 
     # ── EVALUATE ─────────────────────────────────────────────────────────────
     acc = evaluate(model, test_loader, device)
+
+    if os.path.exists(epoch_ckpt):
+        os.remove(epoch_ckpt)
 
     if verbose:
         print(f"  [Round {round_num}] Defended accuracy: {acc:.2f}%")
@@ -172,6 +182,7 @@ def run_minmax(
     baseline_mean: float = None,
     poisoned_mean: float = None,
     verbose: bool = True,
+    use_sgd: bool = False,
 ) -> dict:
     """
     Run the alternating min-max game for multiple rounds and runs.
@@ -213,13 +224,34 @@ def run_minmax(
         print(f"  Device: {device}")
         print(f"{'='*60}")
 
-    round_means = []
-    round_stds  = []
-    all_rows    = []
+    import json
+    ckpt_dir = os.path.join(os.path.dirname(__file__), "..", "results", "checkpoints")
+    os.makedirs(ckpt_dir, exist_ok=True)
+    state_file = os.path.join(ckpt_dir, f"{dataset}_minmax_state.json")
+
+    if os.path.exists(state_file):
+        with open(state_file, "r") as f:
+            state = json.load(f)
+            round_means = state["round_means"]
+            round_stds  = state["round_stds"]
+            all_rows    = state["all_rows"]
+            round_accs  = state.get("last_round_accs", [])
+            if verbose:
+                print(f"  [Loaded {len(round_means)} completed rounds from checkpoint]")
+    else:
+        round_means = []
+        round_stds  = []
+        all_rows    = []
+        round_accs  = []
 
     for round_num in range(1, n_rounds + 1):
         if verbose:
             print(f"\n── Round {round_num}/{n_rounds} ──────────────────────────────────")
+
+        if round_num <= len(round_means):
+            if verbose:
+                print(f"  Round {round_num} summary:  mean={all_rows[round_num-1]['mean']:.2f}% (from checkpoint)")
+            continue
 
         round_accs = []
         for run_idx in range(n_runs):
@@ -236,7 +268,8 @@ def run_minmax(
                 batch_size=batch_size,
                 lr=lr,
                 round_num=round_num,
-                verbose=False,  # Show summary only, not per-epoch detail
+                verbose=False,
+                use_sgd=use_sgd,
             )
             round_accs.append(acc)
 
@@ -254,14 +287,23 @@ def run_minmax(
         if verbose:
             print(f"  Round {round_num} summary:  "
                   f"mean={summary['mean']:.2f}%  std={summary['std']:.2f}%")
+        
+        # Save state
+        with open(state_file, "w") as f:
+            json.dump({
+                "round_means": round_means,
+                "round_stds": round_stds,
+                "all_rows": all_rows,
+                "last_round_accs": round_accs
+            }, f)
 
     # ── Final summary (last round = most "converged" defender) ───────────────
     final_summary = {
         "runs": round_accs,   # final round runs
-        "mean": round_means[-1],
-        "std":  round_stds[-1],
-        "min":  min(round_accs),
-        "max":  max(round_accs),
+        "mean": round_means[-1] if round_means else 0.0,
+        "std":  round_stds[-1] if round_stds else 0.0,
+        "min":  min(round_accs) if round_accs else 0.0,
+        "max":  max(round_accs) if round_accs else 0.0,
     }
 
     df = pd.DataFrame(all_rows)
@@ -307,7 +349,8 @@ def run_minmax(
         "round_means":    round_means,
         "round_stds":     round_stds,
         "final_summary":  final_summary,
-        "all_rounds_df":  df,
+        "all_rounds_df":  df,           # DataFrame (for local use)
+        "all_rounds":     all_rows,     # JSON-serializable list of dicts
     }
 
 

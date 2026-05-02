@@ -63,7 +63,8 @@ def extract_features(
         (features, labels): numpy arrays of shape [N, D] and [N].
     """
     model.eval()
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False,
+                        num_workers=2, pin_memory=True)
 
     all_feats  = []
     all_labels = []
@@ -148,6 +149,10 @@ def spectral_signatures_filter(
 
     features, labels = extract_features(model, dataset, device, batch_size)
 
+    # Infer actual number of classes dynamically (prevents CIFAR-100 bug)
+    if len(labels) > 0:
+        n_classes = max(n_classes, int(np.max(labels)) + 1)
+
     suspicious_idx = set()
     stats = {"n_flagged": 0, "n_total": len(labels), "per_class": {}}
 
@@ -199,6 +204,9 @@ def apply_spectral_defense(
     suspicious_quantile: float = 0.95,
     n_classes: int = 10,
     verbose: bool = True,
+    use_sgd: bool = False,
+    checkpoint_path: str = None,
+    resume_from_checkpoint: str = None,
 ) -> Tuple[nn.Module, float, Dict]:
     """
     Full Spectral Signatures pipeline:
@@ -238,7 +246,7 @@ def apply_spectral_defense(
     clean_subset = Subset(train_dataset, clean_idx)
     clean_loader = DataLoader(
         clean_subset, batch_size=train_loader.batch_size,
-        shuffle=True, num_workers=0,
+        shuffle=True, num_workers=2, pin_memory=True,
     )
 
     # Step 3: Retrain on clean subset
@@ -246,7 +254,8 @@ def apply_spectral_defense(
         print(f"\n[SpectralSignatures] Retraining on {len(clean_idx):,} clean samples...")
     clean_model = model_fn().to(device)
     train_model(clean_model, clean_loader, device,
-                epochs=defender_epochs, lr=defender_lr, verbose=verbose)
+                epochs=defender_epochs, lr=defender_lr, verbose=verbose,
+                use_sgd=use_sgd, checkpoint_path=checkpoint_path, resume_from_checkpoint=resume_from_checkpoint)
 
     # Step 4: Evaluate
     acc = evaluate(clean_model, test_loader, device)

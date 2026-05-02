@@ -12,7 +12,7 @@ DEFENSES COMPARED:
 This generates Tables 1 and Figure 3 in the paper.
 """
 
-import sys, os
+import sys, os, json
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import torch
@@ -33,21 +33,20 @@ from utils.plotting import plot_comparison
 
 TABLES_DIR  = os.path.join(os.path.dirname(__file__), "..", "results", "tables")
 FIGURES_DIR = os.path.join(os.path.dirname(__file__), "..", "results", "figures")
-
+CKPT_DIR    = os.path.join(os.path.dirname(__file__), "..", "results", "checkpoints")
 
 def _get_test_loader(dataset: str = "cifar10", batch_size: int = 128):
-    test_tf = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize(
-            (0.4914,0.4822,0.4465) if dataset == "cifar10" else (0.1307,),
-            (0.2023,0.1994,0.2010) if dataset == "cifar10" else (0.3081,),
-        )
-    ])
+    from data.dataset import get_transforms
+    _, test_tf = get_transforms(dataset, augment=False)
+    
     if dataset == "cifar10":
         ds = datasets.CIFAR10("./data/raw", train=False, download=True, transform=test_tf)
+    elif dataset == "cifar100":
+        ds = datasets.CIFAR100("./data/raw", train=False, download=True, transform=test_tf)
     else:
         ds = datasets.MNIST("./data/raw", train=False, download=True, transform=test_tf)
-    return DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=0)
+        
+    return DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=2)
 
 
 def run_defense_comparison(
@@ -62,6 +61,7 @@ def run_defense_comparison(
     batch_size: int = 64,
     lr: float = 0.001,
     verbose: bool = True,
+    use_sgd: bool = False,
 ) -> pd.DataFrame:
     """
     Run all defenses on the same poisoned data and compare.
@@ -79,21 +79,52 @@ def run_defense_comparison(
     test_loader = _get_test_loader(dataset, batch_size)
 
     all_results = {}
+    
+    os.makedirs(CKPT_DIR, exist_ok=True)
+    state_file = os.path.join(CKPT_DIR, f"{dataset}_defense_comparison_state.json")
+    
+    if os.path.exists(state_file):
+        with open(state_file, "r") as f:
+            state = json.load(f)
+            print(f"[Loaded state from {state_file}]")
+    else:
+        state = {
+            "baseline_accs": [],
+            "poisoned_accs": [],
+            "spec_accs": [],
+            "sever_accs": []
+        }
+        
+    def save_state():
+        with open(state_file, "w") as f:
+            json.dump(state, f)
 
     # ── 1. Clean Baseline ────────────────────────────────────────────────────
     print("\n" + "═"*60)
     print("  [1/5] CLEAN BASELINE")
     print("═"*60)
-    baseline_accs = []
-    for seed in seeds:
+    baseline_accs = state["baseline_accs"]
+    for i, seed in enumerate(seeds):
+        if i < len(baseline_accs):
+            print(f"  Run {seed+1}: {baseline_accs[i]:.2f}% (from checkpoint)")
+            continue
+            
         set_seed(seed)
         raw_train = get_raw_train_dataset(dataset=dataset, augment=True)
-        train_loader = DataLoader(raw_train, batch_size=batch_size, shuffle=True, num_workers=0)
+        train_loader = DataLoader(raw_train, batch_size=batch_size, shuffle=True, num_workers=2)
         model = get_model(device, dataset)
-        train_model(model, train_loader, device, epochs=epochs, lr=lr, verbose=False)
+        
+        epoch_ckpt = os.path.join(CKPT_DIR, f"{dataset}_baseline_s{seed}_epoch.pt")
+        train_model(model, train_loader, device, epochs=epochs, lr=lr, verbose=False, use_sgd=use_sgd,
+                    checkpoint_path=epoch_ckpt, resume_from_checkpoint=epoch_ckpt)
+        
         acc = evaluate(model, test_loader, device)
+        
         baseline_accs.append(acc)
+        save_state()
+        if os.path.exists(epoch_ckpt): os.remove(epoch_ckpt)
         print(f"  Run {seed+1}: {acc:.2f}%")
+        
     all_results["Clean Baseline"] = summarize_runs(baseline_accs)
     print_summary("Clean Baseline", all_results["Clean Baseline"])
 
@@ -101,23 +132,43 @@ def run_defense_comparison(
     print("\n" + "═"*60)
     print("  [2/5] POISONED (No Defense)")
     print("═"*60)
-    poisoned_accs = []
+    poisoned_accs = state["poisoned_accs"]
     poisoned_models = []  # Save for defenses
     poisoned_datasets = []
-    for seed in seeds:
+    
+    for i, seed in enumerate(seeds):
         set_seed(seed)
         raw_train = get_raw_train_dataset(dataset=dataset, augment=False)
         poisoned_train, _ = poison_dataset(raw_train, src_class, tgt_class,
                                            poison_fraction, seed=seed)
-        train_loader = DataLoader(poisoned_train, batch_size=batch_size,
-                                  shuffle=True, num_workers=0)
-        model = get_model(device, dataset)
-        train_model(model, train_loader, device, epochs=epochs, lr=lr, verbose=False)
-        acc = evaluate(model, test_loader, device)
-        poisoned_accs.append(acc)
-        poisoned_models.append(model)
         poisoned_datasets.append((poisoned_train, raw_train))
-        print(f"  Run {seed+1}: {acc:.2f}%")
+        
+        model_ckpt_path = os.path.join(CKPT_DIR, f"{dataset}_poisoned_model_seed_{seed}.pt")
+        model = get_model(device, dataset)
+        
+        if i < len(poisoned_accs):
+            # Load weights
+            model.load_state_dict(torch.load(model_ckpt_path, map_location=device))
+            poisoned_models.append(model)
+            print(f"  Run {seed+1}: {poisoned_accs[i]:.2f}% (from checkpoint)")
+        else:
+            train_loader = DataLoader(poisoned_train, batch_size=batch_size,
+                                      shuffle=True, num_workers=2)
+            
+            epoch_ckpt = os.path.join(CKPT_DIR, f"{dataset}_poisoned_s{seed}_epoch.pt")
+            train_model(model, train_loader, device, epochs=epochs, lr=lr, verbose=False, use_sgd=use_sgd,
+                        checkpoint_path=epoch_ckpt, resume_from_checkpoint=epoch_ckpt)
+            
+            acc = evaluate(model, test_loader, device)
+            
+            torch.save(model.state_dict(), model_ckpt_path)
+            poisoned_accs.append(acc)
+            save_state()
+            if os.path.exists(epoch_ckpt): os.remove(epoch_ckpt)
+            
+            poisoned_models.append(model)
+            print(f"  Run {seed+1}: {acc:.2f}%")
+            
     all_results["Poisoned (No Defense)"] = summarize_runs(poisoned_accs)
     print_summary("Poisoned (No Defense)", all_results["Poisoned (No Defense)"])
 
@@ -125,15 +176,22 @@ def run_defense_comparison(
     print("\n" + "═"*60)
     print("  [3/5] SPECTRAL SIGNATURES (Tran et al. 2018)")
     print("═"*60)
-    spec_accs = []
+    spec_accs = state["spec_accs"]
     for i, seed in enumerate(seeds):
+        if i < len(spec_accs):
+            print(f"  Run {seed+1}: {spec_accs[i]:.2f}% (from checkpoint)")
+            continue
+            
         set_seed(seed)
         poisoned_train, raw_train = poisoned_datasets[i]
         train_loader = DataLoader(poisoned_train, batch_size=batch_size,
-                                  shuffle=True, num_workers=0)
+                                  shuffle=True, num_workers=2)
+        ds_snap = dataset          # snapshot for closure
+        dev_snap = device          # snapshot for closure
+        epoch_ckpt = os.path.join(CKPT_DIR, f"{dataset}_spectral_s{seed}_epoch.pt")
         _, acc, _ = apply_spectral_defense(
             model=poisoned_models[i],
-            model_fn=lambda: get_model(device, dataset),
+            model_fn=lambda ds=ds_snap, dv=dev_snap: get_model(dv, ds),
             train_dataset=poisoned_train,
             train_loader=train_loader,
             test_loader=test_loader,
@@ -141,8 +199,13 @@ def run_defense_comparison(
             defender_epochs=defense_epochs,
             defender_lr=lr,
             verbose=verbose and i == 0,
+            use_sgd=use_sgd,
+            checkpoint_path=epoch_ckpt,
+            resume_from_checkpoint=epoch_ckpt,
         )
         spec_accs.append(acc)
+        save_state()
+        if os.path.exists(epoch_ckpt): os.remove(epoch_ckpt)
         print(f"  Run {seed+1}: {acc:.2f}%")
     all_results["Spectral Signatures"] = summarize_runs(spec_accs)
     print_summary("Spectral Signatures", all_results["Spectral Signatures"])
@@ -151,15 +214,22 @@ def run_defense_comparison(
     print("\n" + "═"*60)
     print("  [4/5] SEVER (Diakonikolas et al. 2019)")
     print("═"*60)
-    sever_accs = []
+    sever_accs = state["sever_accs"]
     for i, seed in enumerate(seeds):
+        if i < len(sever_accs):
+            print(f"  Run {seed+1}: {sever_accs[i]:.2f}% (from checkpoint)")
+            continue
+            
         set_seed(seed)
         poisoned_train, _ = poisoned_datasets[i]
         train_loader = DataLoader(poisoned_train, batch_size=batch_size,
-                                  shuffle=True, num_workers=0)
+                                  shuffle=True, num_workers=2)
+        ds_snap = dataset
+        dev_snap = device
+        epoch_ckpt = os.path.join(CKPT_DIR, f"{dataset}_sever_s{seed}_epoch.pt")
         _, acc, _ = apply_sever_defense(
             model=poisoned_models[i],
-            model_fn=lambda: get_model(device, dataset),
+            model_fn=lambda ds=ds_snap, dv=dev_snap: get_model(dv, ds),
             train_dataset=poisoned_train,
             train_loader=train_loader,
             test_loader=test_loader,
@@ -167,8 +237,13 @@ def run_defense_comparison(
             defender_epochs=defense_epochs,
             defender_lr=lr,
             verbose=verbose and i == 0,
+            use_sgd=use_sgd,
+            checkpoint_path=epoch_ckpt,
+            resume_from_checkpoint=epoch_ckpt,
         )
         sever_accs.append(acc)
+        save_state()
+        if os.path.exists(epoch_ckpt): os.remove(epoch_ckpt)
         print(f"  Run {seed+1}: {acc:.2f}%")
     all_results["SEVER"] = summarize_runs(sever_accs)
     print_summary("SEVER", all_results["SEVER"])
@@ -183,7 +258,10 @@ def run_defense_comparison(
         src_class=src_class, tgt_class=tgt_class,
         poison_fraction=poison_fraction,
         epochs=epochs, batch_size=batch_size, lr=lr,
+        baseline_mean=all_results["Clean Baseline"]["mean"],
+        poisoned_mean=all_results["Poisoned (No Defense)"]["mean"],
         verbose=verbose,
+        use_sgd=use_sgd,
     )
     minmax_accs = minmax_results["round_means"]
     final_minmax = minmax_results["final_summary"]
@@ -226,7 +304,7 @@ def run_defense_comparison(
         stds=df["Std (%)"].tolist(),
         colors=colors,
         save_name="defense_comparison.png",
-        title="Defense Method Comparison (CIFAR-10, poison fraction=50%)",
+        title=f"Defense Method Comparison ({dataset.upper()}, poison fraction={int(poison_fraction*100)}%)",
     )
 
     return df

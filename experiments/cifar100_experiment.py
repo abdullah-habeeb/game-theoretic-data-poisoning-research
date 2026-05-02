@@ -58,7 +58,7 @@ def _test_loader_cifar100(batch_size: int = 128) -> DataLoader:
         transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761)),
     ])
     ds = datasets.CIFAR100("./data/raw", train=False, download=True, transform=tf)
-    return DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=2)
+    return DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=0)
 
 
 def run_cifar100_baseline(
@@ -98,7 +98,6 @@ def run_cifar100_baseline(
     accs = []
     for seed in seeds:
         set_seed(seed)
-        _, _, _ = get_dataloaders("cifar100", batch_size=batch_size, seed=seed)
         raw_train = get_raw_train_dataset("cifar100", augment=True)
         train_loader = DataLoader(raw_train, batch_size=batch_size, shuffle=True, num_workers=2)
 

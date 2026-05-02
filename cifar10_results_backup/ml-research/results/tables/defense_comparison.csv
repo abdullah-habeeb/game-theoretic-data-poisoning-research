@@ -1,0 +1,6 @@
+Method,Mean Acc (%),Std (%),vs Baseline (%)
+Clean Baseline,94.34,0.1,0.0
+Poisoned (No Defense),83.36,0.58,-10.98
+Spectral Signatures,82.8,0.2,-11.54
+SEVER,82.05,0.36,-12.29
+Ours (Min-Max),83.09,0.24,-11.24
