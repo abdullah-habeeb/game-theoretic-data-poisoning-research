@@ -22,7 +22,7 @@ from torchvision import datasets, transforms
 
 from data.dataset import get_raw_train_dataset
 from attacks.label_flip import poison_dataset
-from models.resnet import get_model
+from models.wideresnet import get_model   # handles mnist, cifar10, cifar100 (WRN-28-10)
 from train.trainer import train_model
 from train.evaluator import evaluate
 from utils.seed import set_seed
@@ -35,10 +35,10 @@ TABLES_DIR  = os.path.join(os.path.dirname(__file__), "..", "results", "tables")
 FIGURES_DIR = os.path.join(os.path.dirname(__file__), "..", "results", "figures")
 CKPT_DIR    = os.path.join(os.path.dirname(__file__), "..", "results", "checkpoints")
 
-def _get_test_loader(dataset: str = "cifar10", batch_size: int = 128):
+def _get_test_loader(dataset: str = "cifar10", batch_size: int = 128, num_workers: int = 2):
     from data.dataset import get_transforms
     _, test_tf = get_transforms(dataset, augment=False)
-    
+    pin = torch.cuda.is_available()
     if dataset == "cifar10":
         ds = datasets.CIFAR10("./data/raw", train=False, download=True, transform=test_tf)
     elif dataset == "cifar100":
@@ -46,7 +46,7 @@ def _get_test_loader(dataset: str = "cifar10", batch_size: int = 128):
     else:
         ds = datasets.MNIST("./data/raw", train=False, download=True, transform=test_tf)
         
-    return DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=2)
+    return DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=pin)
 
 
 def run_defense_comparison(
@@ -60,6 +60,7 @@ def run_defense_comparison(
     defense_epochs: int = 10,
     batch_size: int = 64,
     lr: float = 0.001,
+    num_workers: int = 2,
     verbose: bool = True,
     use_sgd: bool = False,
 ) -> pd.DataFrame:
@@ -76,7 +77,8 @@ def run_defense_comparison(
         seeds = list(range(n_runs))
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    test_loader = _get_test_loader(dataset, batch_size)
+    test_loader = _get_test_loader(dataset, batch_size, num_workers)
+    pin = torch.cuda.is_available()
 
     all_results = {}
     
@@ -111,7 +113,8 @@ def run_defense_comparison(
             
         set_seed(seed)
         raw_train = get_raw_train_dataset(dataset=dataset, augment=True)
-        train_loader = DataLoader(raw_train, batch_size=batch_size, shuffle=True, num_workers=2)
+        train_loader = DataLoader(raw_train, batch_size=batch_size, shuffle=True,
+                                  num_workers=num_workers, pin_memory=pin)
         model = get_model(device, dataset)
         
         epoch_ckpt = os.path.join(CKPT_DIR, f"{dataset}_baseline_s{seed}_epoch.pt")
@@ -153,7 +156,7 @@ def run_defense_comparison(
             print(f"  Run {seed+1}: {poisoned_accs[i]:.2f}% (from checkpoint)")
         else:
             train_loader = DataLoader(poisoned_train, batch_size=batch_size,
-                                      shuffle=True, num_workers=2)
+                                      shuffle=True, num_workers=num_workers, pin_memory=pin)
             
             epoch_ckpt = os.path.join(CKPT_DIR, f"{dataset}_poisoned_s{seed}_epoch.pt")
             train_model(model, train_loader, device, epochs=epochs, lr=lr, verbose=False, use_sgd=use_sgd,
@@ -185,7 +188,7 @@ def run_defense_comparison(
         set_seed(seed)
         poisoned_train, raw_train = poisoned_datasets[i]
         train_loader = DataLoader(poisoned_train, batch_size=batch_size,
-                                  shuffle=True, num_workers=2)
+                                  shuffle=True, num_workers=num_workers, pin_memory=pin)
         ds_snap = dataset          # snapshot for closure
         dev_snap = device          # snapshot for closure
         epoch_ckpt = os.path.join(CKPT_DIR, f"{dataset}_spectral_s{seed}_epoch.pt")
@@ -198,6 +201,8 @@ def run_defense_comparison(
             device=device,
             defender_epochs=defense_epochs,
             defender_lr=lr,
+            dataset=dataset,        # FIX: pass dataset so n_classes is inferred correctly
+            num_workers=num_workers,
             verbose=verbose and i == 0,
             use_sgd=use_sgd,
             checkpoint_path=epoch_ckpt,
@@ -223,7 +228,7 @@ def run_defense_comparison(
         set_seed(seed)
         poisoned_train, _ = poisoned_datasets[i]
         train_loader = DataLoader(poisoned_train, batch_size=batch_size,
-                                  shuffle=True, num_workers=2)
+                                  shuffle=True, num_workers=num_workers, pin_memory=pin)
         ds_snap = dataset
         dev_snap = device
         epoch_ckpt = os.path.join(CKPT_DIR, f"{dataset}_sever_s{seed}_epoch.pt")

@@ -66,7 +66,7 @@ import pandas as pd
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 
-from models.resnet import get_model          # routes: mnist→MnistCNN, cifar10→ResNet18
+from models.wideresnet import get_model   # handles mnist, cifar10, cifar100 (WRN-28-10)
 from data.dataset import get_raw_train_dataset, get_transforms
 from train.trainer import train_model
 from train.evaluator import evaluate

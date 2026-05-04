@@ -202,7 +202,9 @@ def apply_spectral_defense(
     defender_epochs: int = 10,
     defender_lr: float = 0.001,
     suspicious_quantile: float = 0.95,
-    n_classes: int = 10,
+    n_classes: int = None,   # Auto-inferred from dataset if None
+    dataset: str = "cifar10",
+    num_workers: int = 2,
     verbose: bool = True,
     use_sgd: bool = False,
     checkpoint_path: str = None,
@@ -234,6 +236,11 @@ def apply_spectral_defense(
     from train.trainer import train_model
     from train.evaluator import evaluate
 
+    # Auto-infer n_classes from dataset name if not provided
+    if n_classes is None:
+        _n_classes_map = {"mnist": 10, "cifar10": 10, "cifar100": 100}
+        n_classes = _n_classes_map.get(dataset, 10)
+
     # Step 1: Get clean indices
     clean_idx, stats = spectral_signatures_filter(
         model, train_dataset, device,
@@ -244,9 +251,10 @@ def apply_spectral_defense(
 
     # Step 2: Build filtered DataLoader
     clean_subset = Subset(train_dataset, clean_idx)
+    pin = torch.cuda.is_available()
     clean_loader = DataLoader(
         clean_subset, batch_size=train_loader.batch_size,
-        shuffle=True, num_workers=2, pin_memory=True,
+        shuffle=True, num_workers=num_workers, pin_memory=pin,
     )
 
     # Step 3: Retrain on clean subset

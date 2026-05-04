@@ -315,62 +315,62 @@ def run_cifar100_full_pipeline(
     verbose: bool = True,
 ) -> dict:
     """
-    Run the complete CIFAR-100 research pipeline:
-      1. Clean baseline
-      2. Poisoned (label-flip)
-      3. Poison fraction sweep
-      4. Full defense comparison
+    Run the complete CIFAR-100 research pipeline using the bulletproof
+    defense_comparison.py engine, which handles epoch-level checkpointing
+    and state persistence for all 5 methods:
+      1. Clean baseline (WRN-28-10)
+      2. Poisoned (label-flip, no defense)
+      3. Spectral Signatures defense
+      4. SEVER defense
+      5. Min–Max alternating training (our method)
 
     Returns a dict with all results.
     """
+    from experiments.defense_comparison import run_defense_comparison
+
     if seeds is None:
         seeds = list(range(n_runs))
 
     print("\n" + "🔬"*30)
     print("  CIFAR-100 FULL RESEARCH PIPELINE")
     print("🔬"*30)
+    print(f"\n  Routing through defense_comparison engine")
+    print(f"  Dataset : CIFAR-100  |  Model: WideResNet-28-10")
+    print(f"  Attack  : aquarium_fish (1) → flatfish (32)  |  fraction=50%")
+    print(f"  Epochs  : {epochs}  |  Runs: {n_runs}  |  Optimizer: SGD+CosineAnneal")
 
-    # Step 1: Baseline
-    print("\n\n[STEP 1] Clean Baseline")
-    baseline = run_cifar100_baseline(n_runs=n_runs, seeds=seeds, epochs=epochs,
-                                     batch_size=batch_size, verbose=verbose)
-
-    # Step 2: Poisoning
-    print("\n\n[STEP 2] Label-Flip Attack")
-    poisoned = run_cifar100_poisoned(n_runs=n_runs, seeds=seeds, epochs=epochs,
-                                     batch_size=batch_size, verbose=verbose)
-
-    # Step 3: Sweep
-    print("\n\n[STEP 3] Poison Fraction Sweep")
-    sweep_df = run_cifar100_sweep(n_runs=n_runs, seeds=seeds, epochs=epochs,
-                                  batch_size=batch_size, verbose=verbose)
-
-    # Step 4: Summary
-    print("\n\n[STEP 4] Statistical Significance")
-    # Use run accuracies for significance testing
-    sig = full_significance_report(
-        baseline_accs=baseline["runs"],
-        poisoned_accs=poisoned["runs"],
-        defended_accs=poisoned["runs"],  # Placeholder — fill with min-max results
-        verbose=True,
+    df = run_defense_comparison(
+        n_runs=n_runs,
+        seeds=seeds,
+        dataset="cifar100",
+        src_class=CIFAR100_DEFAULT_SRC,   # 1 = aquarium_fish
+        tgt_class=CIFAR100_DEFAULT_TGT,   # 32 = flatfish
+        poison_fraction=0.5,
+        epochs=epochs,
+        defense_epochs=epochs,
+        batch_size=batch_size,
+        lr=0.1,            # WRN standard lr
+        num_workers=2,
+        use_sgd=True,      # SGD + CosineAnneal is the standard for WRN/CIFAR-100
+        verbose=verbose,
     )
 
-    # Final comparison bar chart
-    plot_comparison(
-        labels=["CIFAR-100\nBaseline", "CIFAR-100\nPoisoned"],
-        means=[baseline["mean"], poisoned["mean"]],
-        stds=[baseline["std"], poisoned["std"]],
-        save_name="cifar100_baseline_vs_poisoned.png",
-        title="CIFAR-100: Baseline vs Poisoned (WideResNet-28-10)",
+    print("\n\n✅ CIFAR-100 Full Pipeline Complete!")
+    print(df.to_string(index=False))
+
+    # Poison fraction sweep (after the main run)
+    print("\n\n[STEP 2] Poison Fraction Sweep")
+    sweep_df = run_cifar100_sweep(
+        n_runs=n_runs, seeds=seeds, epochs=epochs,
+        batch_size=batch_size, verbose=verbose,
     )
 
     return {
-        "baseline": baseline,
-        "poisoned": poisoned,
-        "sweep":    sweep_df,
-        "significance": sig,
+        "defense_comparison": df,
+        "sweep": sweep_df,
     }
 
 
 if __name__ == "__main__":
     results = run_cifar100_full_pipeline(n_runs=3, epochs=100, batch_size=128)
+

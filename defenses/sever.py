@@ -264,9 +264,10 @@ def apply_sever_defense(
 
     # Retrain
     clean_subset = Subset(train_dataset, clean_idx)
+    pin = next(model.parameters()).is_cuda   # match device of incoming model
     clean_loader = DataLoader(
         clean_subset, batch_size=train_loader.batch_size,
-        shuffle=True, num_workers=2, pin_memory=True,
+        shuffle=True, num_workers=2, pin_memory=pin,
     )
 
     if verbose:
