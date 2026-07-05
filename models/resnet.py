@@ -124,22 +124,90 @@ class ResNet18(nn.Module):
         return x.view(x.size(0), -1)   # [B, 512]
 
 
-def get_model(device: torch.device, dataset: str = "cifar10") -> nn.Module:
+def get_model(device: torch.device, dataset: str = "cifar10",
+              arch: str = "resnet18") -> nn.Module:
     """
-    Return the appropriate model for the given dataset.
+    Return the appropriate model for the given dataset and architecture.
 
     Args:
         device:  torch.device to move model to.
-        dataset: 'cifar10' → ResNet-18, 'mnist' → MnistCNN.
+        dataset: 'cifar10' | 'cifar100' | 'mnist' | 'gtsrb'
+        arch:    'resnet18' (default) | 'resnet50' (for scalability study)
     """
-    if dataset == "cifar10":
-        model = ResNet18(num_classes=10)
-    elif dataset == "mnist":
+    nc_map = {"cifar10": 10, "cifar100": 100, "mnist": 10, "gtsrb": 43}
+    nc = nc_map.get(dataset, 10)
+
+    if dataset == "mnist":
         from models.cnn import MnistCNN
-        model = MnistCNN(num_classes=10)
+        model = MnistCNN(num_classes=nc)
+    elif arch == "resnet50":
+        model = ResNet50CIFAR(num_classes=nc)
     else:
-        raise ValueError(f"Unknown dataset '{dataset}'.")
+        model = ResNet18(num_classes=nc)
     return model.to(device)
+
+
+# ── ResNet-50 (Bottleneck blocks) for scalability study ──────────────────────
+
+class Bottleneck(nn.Module):
+    """ResNet Bottleneck: 1x1→3x3→1x1 convolutions. Expansion=4."""
+    expansion = 4
+
+    def __init__(self, in_planes: int, planes: int, stride: int = 1):
+        super().__init__()
+        self.conv1 = nn.Conv2d(in_planes, planes, 1, bias=False)
+        self.bn1   = nn.BatchNorm2d(planes)
+        self.conv2 = nn.Conv2d(planes, planes, 3, stride=stride, padding=1, bias=False)
+        self.bn2   = nn.BatchNorm2d(planes)
+        self.conv3 = nn.Conv2d(planes, planes * 4, 1, bias=False)
+        self.bn3   = nn.BatchNorm2d(planes * 4)
+        self.shortcut = nn.Sequential()
+        if stride != 1 or in_planes != planes * 4:
+            self.shortcut = nn.Sequential(
+                nn.Conv2d(in_planes, planes * 4, 1, stride=stride, bias=False),
+                nn.BatchNorm2d(planes * 4))
+
+    def forward(self, x):
+        out = F.relu(self.bn1(self.conv1(x)))
+        out = F.relu(self.bn2(self.conv2(out)))
+        out = self.bn3(self.conv3(out))
+        out += self.shortcut(x)
+        return F.relu(out)
+
+
+class ResNet50CIFAR(nn.Module):
+    """ResNet-50 for CIFAR-style 32x32 inputs (~23.5M params)."""
+
+    def __init__(self, num_classes: int = 10):
+        super().__init__()
+        self.stem    = nn.Sequential(
+            nn.Conv2d(3, 64, 3, stride=1, padding=1, bias=False),
+            nn.BatchNorm2d(64), nn.ReLU(inplace=True))
+        self.layer1  = self._make(64,   64,  3, 1)
+        self.layer2  = self._make(256,  128, 4, 2)
+        self.layer3  = self._make(512,  256, 6, 2)
+        self.layer4  = self._make(1024, 512, 3, 2)
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        self.fc      = nn.Linear(2048, num_classes)
+
+    def _make(self, in_p, p, n, s):
+        return nn.Sequential(Bottleneck(in_p, p, s),
+                             *[Bottleneck(p*4, p) for _ in range(1, n)])
+
+    def forward(self, x):
+        x = self.stem(x)
+        x = self.layer1(x); x = self.layer2(x)
+        x = self.layer3(x); x = self.layer4(x)
+        return self.fc(self.avgpool(x).view(x.size(0), -1))
+
+    def get_features(self, x):
+        x = self.stem(x)
+        x = self.layer1(x); x = self.layer2(x)
+        x = self.layer3(x); x = self.layer4(x)
+        return self.avgpool(x).view(x.size(0), -1)
+
+    def count_parameters(self):
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)
 
 
 if __name__ == "__main__":

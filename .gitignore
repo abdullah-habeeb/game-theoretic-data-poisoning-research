@@ -3,3 +3,15 @@ __pycache__/
 *.pyc
 results/checkpoints/
 .ipynb_checkpoints/
+data/
+fgcs/
+final-results/
+Final_Merged_Results/
+cifar10_results_backup/
+MNIST results/
+cifar-100 results/
+*.zip
+*.pdf
+*.log
+ml-research latex.txt
+research_paper.txt

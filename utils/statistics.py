@@ -174,3 +174,39 @@ def full_significance_report(
         "defended_vs_poisoned": r2,
         "baseline_vs_defended": r3,
     }
+
+
+#  Phase-2: Wilcoxon + pairwise table 
+import warnings, pandas as pd
+
+def wilcoxon_test(a, b, alpha=0.05):
+    import numpy as np; from scipy import stats
+    a_, b_ = np.array(a, float), np.array(b, float)
+    if len(a_) < 3: return {'stat': float('nan'), 'p_value': 1.0, 'significant': False, 'better': 'tie'}
+    diff = a_ - b_
+    if np.all(diff == 0): return {'stat': 0.0, 'p_value': 1.0, 'significant': False, 'better': 'tie'}
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        stat, p = stats.wilcoxon(a_, b_, alternative='two-sided')
+    return {'stat': float(stat), 'p_value': float(p), 'significant': bool(p < alpha),
+            'better': 'a' if float(np.mean(a_)) > float(np.mean(b_)) else 'b',
+            'mean_a': float(np.mean(a_)), 'mean_b': float(np.mean(b_)),
+            'std_a': float(np.std(a_)), 'std_b': float(np.std(b_)), 'n': len(a_)}
+
+
+def pairwise_significance_table(results, alpha=0.05, metric_name='Acc %'):
+    import numpy as np, pandas as pd
+    methods = list(results.keys())
+    rows = []
+    for i, m_a in enumerate(methods):
+        for m_b in methods[i+1:]:
+            res = wilcoxon_test(results[m_a], results[m_b], alpha=alpha)
+            d   = cohens_d(np.array(results[m_a]), np.array(results[m_b]))
+            rows.append({'Method A': m_a, 'Method B': m_b,
+                         f'Mean A': round(res.get('mean_a', float('nan')), 2),
+                         f'Mean B': round(res.get('mean_b', float('nan')), 2),
+                         'Diff': round(res.get('mean_a', 0) - res.get('mean_b', 0), 2),
+                         'p-value': round(res.get('p_value', 1.0), 4),
+                         'Sig?': 'Yes' if res.get('significant') else 'No',
+                         'Cohen d': round(d, 2), 'Effect': interpret_cohens_d(d)})
+    return pd.DataFrame(rows) if rows else pd.DataFrame()
